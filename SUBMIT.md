@@ -31,7 +31,7 @@
 
 ## 二、投稿步骤
 
-### 1. 建一个插件仓库（一个插件一个仓库）
+### 1. 建一个插件仓库（已完成）
 
 市场按 **Git 仓库 → Release → 资产** 的方式拉取插件，所以必须有一个独立仓库，
 且**不能用 MaiBot 主仓、也不能用 jmcomic 上游仓**作为 `urls.repository`。
@@ -61,7 +61,7 @@ mai-jmcomic/
 即：把本目录内容整体推到仓库根，**不要再套一层 `mai-jmcomic/` 目录**，
 否则 Host 找不到 `_manifest.json`。
 
-### 2. 打 Release 并上传资产
+### 2. 打 Release 并上传资产（已完成）
 
 - Tag 用 `v1.5.1` 形式（与清单 `version` 对应）；
 - Release 里附一个 **zip**，解压后能直接看到 `_manifest.json` 与 `plugin.py`；
