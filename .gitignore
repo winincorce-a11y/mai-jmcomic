@@ -1,0 +1,13 @@
+# python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# 运行时生成
+/config.toml
+/data/
+/temp/
+/tests/.tmp/
+.cache/
