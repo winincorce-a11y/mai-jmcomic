@@ -839,11 +839,12 @@ class ConfigSchemaTests(unittest.TestCase):
                     self.assertTrue(desc, "缺少 description")
                     checked += 1
 
-        # 覆盖全部配置节
+        # 覆盖全部配置节（tools 为审核后新增的 LLM 工具开关）
         self.assertEqual(
-            set(sections), {"plugin", "download", "send", "limits", "search", "filter"}
+            set(sections),
+            {"plugin", "download", "send", "limits", "search", "tools", "filter"},
         )
-        self.assertGreaterEqual(checked, 26)
+        self.assertGreaterEqual(checked, 27)
 
     def test_numeric_fields_have_step(self) -> None:
         import plugin as plugin_module
@@ -1005,16 +1006,118 @@ class ToolTests(PluginTestCase):
         result = await self.plugin.tool_search("")
         self.assertFalse(result["success"])
 
-    async def test_download_tool(self) -> None:
-        result = await self.plugin.tool_download("350234", "album", stream_id="s1", user_id="u1", group_id="g1")
+    async def test_download_tool_disabled_by_default(self) -> None:
+        """审核要求：AI 下载工具默认关闭，不得由模型自行触发。"""
+
+        result = await self.plugin.tool_download(
+            "350234", "album", stream_id="s1", user_id="u1", group_id="g1"
+        )
+        self.assertFalse(result["success"])
+        self.assertIn("默认关闭", result["content"])
+        # 不应产生任何下载任务
+        self.assertFalse(self.plugin._jobs)
+
+    async def test_download_tool_when_enabled(self) -> None:
+        """管理员显式开启后，工具才允许入队。"""
+
+        config = self.plugin.get_default_config()
+        config["limits"]["cooldown_seconds"] = 0
+        config["tools"]["allow_download"] = True
+        self.plugin.set_plugin_config(config)
+
+        result = await self.plugin.tool_download(
+            "350234", "album", stream_id="s1", user_id="u1", group_id="g1"
+        )
         self.assertTrue(result["success"])
         self.assertIn("任务已创建", result["content"])
         await wait_jobs(self.plugin)
         self.assertTrue(self.send.forwards)
 
     async def test_download_tool_bad_id(self) -> None:
+        config = self.plugin.get_default_config()
+        config["limits"]["cooldown_seconds"] = 0
+        config["tools"]["allow_download"] = True
+        self.plugin.set_plugin_config(config)
+
         result = await self.plugin.tool_download("abc", "album", stream_id="s1")
         self.assertFalse(result["success"])
+        self.assertIn("纯数字", result["content"])
+
+
+class SecurityHardeningTests(PluginTestCase):
+    """审核提出的工程加固项。"""
+
+    def test_base_dir_rejects_absolute_path(self) -> None:
+        """审核意见：base_dir 曾接受任意绝对路径，配合发送后删除会污染外部目录。"""
+
+        config = self.plugin.get_default_config()
+        config["limits"]["cooldown_seconds"] = 0
+        config["download"]["base_dir"] = "C:/Windows/Temp/jm-should-not-use"
+        self.plugin.set_plugin_config(config)
+
+        root = self.plugin._resolve_download_root()
+        data_dir = Path(self.plugin.ctx.paths.data_dir).resolve()
+        self.assertTrue(root.is_relative_to(data_dir), f"{root} 不应越出 {data_dir}")
+        self.assertEqual(root, data_dir / "downloads")
+
+    def test_base_dir_rejects_parent_escape(self) -> None:
+        config = self.plugin.get_default_config()
+        config["limits"]["cooldown_seconds"] = 0
+        config["download"]["base_dir"] = "../../etc"
+        self.plugin.set_plugin_config(config)
+
+        root = self.plugin._resolve_download_root()
+        data_dir = Path(self.plugin.ctx.paths.data_dir).resolve()
+        self.assertTrue(root.is_relative_to(data_dir))
+
+    def test_base_dir_accepts_relative(self) -> None:
+        config = self.plugin.get_default_config()
+        config["limits"]["cooldown_seconds"] = 0
+        config["download"]["base_dir"] = "comics/sub"
+        self.plugin.set_plugin_config(config)
+
+        root = self.plugin._resolve_download_root()
+        data_dir = Path(self.plugin.ctx.paths.data_dir).resolve()
+        self.assertEqual(root, (data_dir / "comics" / "sub").resolve())
+
+    def test_base_dir_empty_uses_default(self) -> None:
+        root = self.plugin._resolve_download_root()
+        data_dir = Path(self.plugin.ctx.paths.data_dir).resolve()
+        self.assertEqual(root, data_dir / "downloads")
+
+    async def test_cover_cache_is_trimmed(self) -> None:
+        """审核意见：封面缓存只增不清会吃磁盘，需按上限淘汰。"""
+
+        from jm_service import JmService
+
+        covers = Path(self.plugin.ctx.paths.data_dir) / "covers"
+        covers.mkdir(parents=True, exist_ok=True)
+        # 造 12 个文件，上限压到 10
+        for index in range(12):
+            (covers / f"90000{index}_3x4.jpg").write_bytes(b"x")
+
+        removed = JmService._trim_cover_cache(covers, limit=10)
+        remaining = list(covers.glob("*.jpg"))
+        self.assertGreater(removed, 0)
+        self.assertLessEqual(len(remaining), 10)
+
+    async def test_cover_cache_noop_below_limit(self) -> None:
+        from jm_service import JmService
+
+        covers = Path(self.plugin.ctx.paths.data_dir) / "covers2"
+        covers.mkdir(parents=True, exist_ok=True)
+        for index in range(3):
+            (covers / f"91000{index}_3x4.jpg").write_bytes(b"x")
+
+        removed = JmService._trim_cover_cache(covers, limit=10)
+        self.assertEqual(removed, 0)
+        self.assertEqual(len(list(covers.glob("*.jpg"))), 3)
+
+    async def test_download_tool_off_by_default_in_config(self) -> None:
+        """默认配置里 AI 下载就应该是关的。"""
+
+        defaults = self.plugin.get_default_config()
+        self.assertFalse(defaults["tools"]["allow_download"])
 
 
 class MissingJmcomicTests(unittest.IsolatedAsyncioTestCase):

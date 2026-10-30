@@ -1,5 +1,25 @@
 # Changelog
 
+## 1.5.3
+
+### 按插件中心审核意见修复
+
+审核 Issue：<https://github.com/Mai-with-u/plugin-repo/issues/1186>
+
+- **download.base_dir 只接受插件数据目录内的相对路径**。此前接受任意绝对
+  路径，配合 delete_after_send=true 会在该目录下先建再删 JM<车号>；
+  虽然 _cleanup 有 is_relative_to 兜底、删不出下载根目录，但仍会污染
+  运维指定的共享目录。现在绝对路径 / 盘符 / .. 越界一律忽略并回落默认目录。
+- **LLM 下载工具默认关闭**。新增 [tools].allow_download（默认 alse）：
+  关闭时工具只返回提示，不创建任务。只读工具（jmcomic_search）不受影响。
+- **封面缓存加淘汰策略**。此前 covers/ 只增不清；现在上限 500 个文件，
+  超出按 mtime 从旧到新删到 80%，每次下载前检查。
+- **版本号对齐**：README 头部此前仍写 1.1.0，现与 manifest 统一为 1.5.3；
+  SUBMIT.md 的占位仓库地址与旧版本号也已更新为实际值。
+
+单测 172 → **180 个**，新增 base_dir 三类越界拒绝、封面缓存裁剪、
+AI 下载工具默认关闭等用例。
+
 ## 1.5.2
 
 ### 变更

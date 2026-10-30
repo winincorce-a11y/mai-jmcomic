@@ -90,6 +90,13 @@ _COVER_SIZE = "_3x4"
 #: 一次最多给多少条结果配封面。搜索页默认 10 条，这是兜底上限。
 _COVER_MAX = 30
 
+#: 封面缓存目录最多保留多少个文件。审核意见指出此前「只增不清」，
+#: 长期运行会持续吃磁盘；这里按文件数做上限，超出按 mtime 从旧到新删。
+_COVER_CACHE_FILES = 500
+
+#: 触发清理的阈值：达到上限后一次性删到 80%，避免每次都扫目录。
+_COVER_CACHE_TRIM_RATIO = 0.8
+
 #: 下载封面的总时间预算（秒）。封面是锦上添花，到点就走，缺几张不影响列表。
 _COVER_BUDGET = 30.0
 
@@ -512,6 +519,39 @@ class JmService:
         self._page_cache_put(key, page)
         return page
 
+    @staticmethod
+    def _trim_cover_cache(target: Path, limit: int = _COVER_CACHE_FILES) -> int:
+        """把封面缓存目录裁剪到 ``limit`` 个文件以内，返回删除数量。
+
+        按 mtime 从旧到新删，保留下来的都是最近用过的。任何异常都吞掉：
+        缓存清理失败不该影响搜索。
+        """
+
+        try:
+            files = [item for item in target.iterdir() if item.is_file() and item.suffix == ".jpg"]
+        except OSError:
+            return 0
+        if len(files) <= limit:
+            return 0
+
+        keep = max(1, int(limit * _COVER_CACHE_TRIM_RATIO))
+        victims = len(files) - keep
+        try:
+            files.sort(key=lambda item: item.stat().st_mtime)
+        except OSError:
+            return 0
+
+        removed = 0
+        for item in files[:victims]:
+            try:
+                item.unlink()
+                removed += 1
+            except OSError:
+                continue
+        if removed:
+            logger.info("封面缓存超出上限（%s），清理了 %s 张旧图", limit, removed)
+        return removed
+
     def fetch_covers(
         self,
         album_ids: list[str],
@@ -538,6 +578,8 @@ class JmService:
 
         target = Path(target_dir)
         target.mkdir(parents=True, exist_ok=True)
+        # 审核意见：缓存只增不清会吃磁盘，这里按文件数做上限裁剪
+        self._trim_cover_cache(target)
 
         option = self.build_option(target, settings)
         module = self._load()

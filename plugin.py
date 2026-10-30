@@ -205,11 +205,14 @@ class DownloadSection(PluginConfigBase):
 
     base_dir: str = Field(
         default="",
-        description="下载根目录；留空使用 data/plugins/<插件ID>/downloads，相对路径基于该目录",
+        description="下载根目录，只接受插件数据目录内的相对路径；留空使用 downloads",
         json_schema_extra={
             "label": "下载根目录",
-            "placeholder": "D:/comics",
-            "hint": "留空则存到 MaiBot 数据目录下；填相对路径时同样基于该目录",
+            "placeholder": "downloads/comics",
+            "hint": (
+                "只允许相对路径，且不得跳出插件数据目录（填绝对路径或 .. 会被忽略并回落到默认值）。"
+                "留空则存到 data/plugins/<插件ID>/downloads"
+            ),
         },
     )
     dir_rule: str = Field(
@@ -496,6 +499,26 @@ class SearchSection(PluginConfigBase):
     )
 
 
+class ToolSection(PluginConfigBase):
+    """给 LLM 用的工具开关。"""
+
+    __ui_label__ = "LLM 工具"
+    __ui_icon__ = "bot-message-square"
+    __ui_order__ = 6
+
+    allow_download: bool = Field(
+        default=False,
+        description="是否允许 LLM 工具 jmcomic_download 自行创建下载任务",
+        json_schema_extra={
+            "label": "允许 AI 触发下载",
+            "hint": (
+                "默认关闭。开启后模型可以不经用户确认就把图片发进群；"
+                "只读工具（搜索/详情）始终可用，不受此项影响"
+            ),
+        },
+    )
+
+
 class FilterSection(PluginConfigBase):
     """AI 作品过滤。"""
 
@@ -545,6 +568,7 @@ class JmComicConfig(PluginConfigBase):
     send: SendSection = Field(default_factory=SendSection)
     limits: LimitSection = Field(default_factory=LimitSection)
     search: SearchSection = Field(default_factory=SearchSection)
+    tools: ToolSection = Field(default_factory=ToolSection)
     filter: FilterSection = Field(default_factory=FilterSection)
 
 
@@ -743,7 +767,8 @@ class JmComicPlugin(MaiBotPlugin):
         "jmcomic_download",
         description=(
             "按车号下载禁漫（JMComic）本子，并把图片发送到当前聊天。"
-            "只应在用户明确要求下载、且给出了数字车号时调用；下载需要较长时间。"
+            "**默认被管理员关闭**，关闭时调用只会返回提示；"
+            "需要用户明确要求下载并给出数字车号才可调用。"
             "参数 jm_id 是纯数字编号，kind 为 album（整本）或 photo（单章）。"
         ),
         parameters=[
@@ -770,6 +795,15 @@ class JmComicPlugin(MaiBotPlugin):
         """把下载任务丢进队列，立即返回任务号。"""
 
         del kwargs
+        # 审核意见：把触发权交给规划器风险太大，默认关闭，需管理员显式开启。
+        if not self.config.tools.allow_download:
+            return {
+                "success": False,
+                "content": (
+                    "本插件的 AI 下载工具默认关闭。"
+                    "请让用户直接发送 /jm <车号> 自行触发，或由管理员在插件配置里开启「允许 AI 触发下载」。"
+                ),
+            }
         clean_id = re.sub(r"(?i)^(?:jmcomic|jm|禁漫|车号|車號)[-_:#：]?\s*", "", str(jm_id or "").strip())
         if not clean_id.isdigit() or not 4 <= len(clean_id) <= 8:
             return {"success": False, "content": "jm_id 必须是 4~8 位纯数字车号"}
@@ -1859,15 +1893,41 @@ class JmComicPlugin(MaiBotPlugin):
         )
 
     def _resolve_download_root(self) -> Path:
-        """解析下载根目录。"""
+        """解析下载根目录，**只允许落在插件数据目录内**。
+
+        审核意见：``base_dir`` 以前接受任意绝对路径，配合
+        ``delete_after_send=true`` 会在该目录下先建再删 ``JM<车号>``。
+        虽然 ``_cleanup`` 有 ``is_relative_to`` 兜底、删不出下载根目录，
+        但运维把 base_dir 指到共享目录时仍会污染那里。
+
+        现在规则：
+        - 绝对路径、盘符路径、含 ``..`` 的路径一律忽略，回落到默认目录；
+        - 所有结果都会被解析成本地路径并校验是否仍在数据目录内。
+        """
+
+        data_root = Path(self.ctx.paths.data_dir).resolve()
+        default_root = data_root / "downloads"
 
         raw = str(self.config.download.base_dir or "").strip()
         if not raw:
-            return Path(self.ctx.paths.data_dir) / "downloads"
-        path = Path(raw).expanduser()
-        if not path.is_absolute():
-            path = Path(self.ctx.paths.data_dir) / path
-        return path
+            return default_root
+
+        candidate = Path(raw).expanduser()
+        # 绝对路径 / 盘符 / UNC 一律拒绝
+        if candidate.is_absolute() or candidate.drive or candidate.root:
+            self.ctx.logger.warning(
+                "base_dir 只接受相对路径，已忽略绝对路径：%s", raw
+            )
+            return default_root
+
+        resolved = (data_root / candidate).resolve()
+        if not is_relative_to(resolved, data_root) or resolved == data_root:
+            self.ctx.logger.warning(
+                "base_dir 越出插件数据目录，已忽略：%s", raw
+            )
+            return default_root
+
+        return resolved
 
     @staticmethod
     def _parse_chat_ids(raw: Any) -> set[str]:
