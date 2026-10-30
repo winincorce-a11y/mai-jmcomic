@@ -6,7 +6,7 @@
 
 | 项目 | 值 |
 | --- | --- |
-| 插件 ID | `com.deepseek.jmcomic` |
+| 插件 ID | `github.winincorce-a11y.mai-jmcomic` |
 | 插件版本 | `1.1.0` |
 | 宿主版本区间 | `1.3.0` ~ `1.3.99` |
 | SDK 区间 | `2.19.0` ~ `2.99.99` |
@@ -157,7 +157,7 @@ JM123456      jm-123456      jm_123456      禁漫123456     车号：123456
 | `retry_times` | `3` | 请求重试次数，范围 0~10 |
 | `delete_after_send` | `false` | 发送成功后删除本地文件 |
 
-> 插件数据目录由 Host 分配，通常是 `data/plugins/com.deepseek.jmcomic/`。
+> 插件数据目录由 Host 分配，通常是 `data/plugins/github.winincorce-a11y.mai-jmcomic/`。
 > 实际落盘路径形如 `<base_dir>/JM<车号>/<章节名>/00001.jpg`。
 
 ### `[send]`

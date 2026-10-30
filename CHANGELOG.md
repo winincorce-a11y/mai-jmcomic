@@ -1,5 +1,22 @@
 # Changelog
 
+## 1.5.2
+
+### 变更
+
+- **插件 ID 改为官方推荐格式**：`com.deepseek.jmcomic` →
+  `github.winincorce-a11y.mai-jmcomic`。旧 ID 不符合插件中心模板建议的
+  `github.username.xxx` 结构；本次改动后与官方示例一致。
+- 版本号提升到 `1.5.2`。**ID 变更必须发新版本**：已收录版本的 Tag 与 commit
+  不可修改，改 ID 只能通过新版本生效。
+- 同步更新 README、SUBMIT.md 中出现的旧 ID。
+
+> 从旧版本升级：插件数据目录会随之从 `data/plugins/com.deepseek.jmcomic`
+> 变为 `data/plugins/github.winincorce-a11y.mai-jmcomic`，需要手动迁移
+> `quota.json` 与 `covers/`（详见 README）。
+
+## 1.5.1
+
 ## 1.5.1
 
 ### 主要功能

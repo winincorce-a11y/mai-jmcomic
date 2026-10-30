@@ -1,6 +1,6 @@
 # 投稿到 MaiBot 插件仓库
 
-本文件记录把 MaiBot 插件 **JMComic 下载**（`com.deepseek.jmcomic`）投稿到
+本文件记录把 MaiBot 插件 **JMComic 下载**（`github.winincorce-a11y.mai-jmcomic`）投稿到
 官方插件市场需要做的事。市场索引仓库是
 [`Mai-with-u/plugin-repo`](https://github.com/Mai-with-u/plugin-repo)，
 主程序通过它读取 `plugin_details.json` / `plugin_versions.json`。
@@ -12,7 +12,7 @@
 | 条件 | 要求 | 本插件状态 |
 | --- | --- | --- |
 | Manifest 版本 | `manifest_version` 必须为 `2` | ✅ `2` |
-| 插件 ID | 字母/数字/下划线，用 `.` 或 `-` 分隔，至少两段 | ✅ `com.deepseek.jmcomic` |
+| 插件 ID | 字母/数字/下划线，用 `.` 或 `-` 分隔，至少两段 | ✅ `github.winincorce-a11y.mai-jmcomic` |
 | 版本号 | **严格三段式** `X.Y.Z` | ✅ `1.5.1` |
 | 必填字段 | `id` `version` `name` `description` `author` `license` `urls` `host_application` `sdk` `capabilities` `i18n` | ✅ 全部齐备 |
 | `author` | 必须是 `{name, url}`，`url` 必须是 `http(s)://` | ✅ |
@@ -69,12 +69,12 @@ mai-jmcomic/
 
 ### 3. 向 `Mai-with-u/plugin-repo` 提交 PR
 
-在索引仓库中添加/更新该插件的条目（`id` 用清单里的 `com.deepseek.jmcomic`），
+在索引仓库中添加/更新该插件的条目（`id` 用清单里的 `github.winincorce-a11y.mai-jmcomic`），
 至少包含：
 
 ```json
 {
-  "id": "com.deepseek.jmcomic",
+  "id": "github.winincorce-a11y.mai-jmcomic",
   "manifest": { "...": "与 _manifest.json 一致" },
   "repository_url": "https://github.com/deepseek-ai/mai-jmcomic",
   "keywords": ["jmcomic", "禁漫", "本子", "同人", "下载", "漫画"],
@@ -88,7 +88,7 @@ mai-jmcomic/
 
 ## 三、给审核者的说明（可直接用）
 
-> **插件名**：JMComic 下载（`com.deepseek.jmcomic`）
+> **插件名**：JMComic 下载（`github.winincorce-a11y.mai-jmcomic`）
 >
 > **功能**：把 `jmcomic` 库接进 MaiBot。群里发车号即可后台下载整本/单章，
 > 用合并转发（一条聊天记录）发回；支持五种搜索（站内 / 作品系列 / 作者 /

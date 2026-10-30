@@ -90,7 +90,7 @@ __all__ = [
     "create_plugin",
 ]
 
-PLUGIN_ID = "com.deepseek.jmcomic"
+PLUGIN_ID = "github.winincorce-a11y.mai-jmcomic"
 
 #: 主命令：``/jm``、``/jmcomic``、``/禁漫``，后面可跟任意参数。
 _COMMAND_PATTERN = r"(?i)^\s*[/／]\s*(?:jmcomic|jm|禁漫)(?:\s+(?P<args>.*))?$"

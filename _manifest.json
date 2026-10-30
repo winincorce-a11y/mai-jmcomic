@@ -1,7 +1,7 @@
 {
   "manifest_version": 2,
-  "id": "com.deepseek.jmcomic",
-  "version": "1.5.1",
+  "id": "github.winincorce-a11y.mai-jmcomic",
+  "version": "1.5.2",
   "name": "JMComic 下载",
   "description": "把 JMComic-Crawler-Python 接进 MaiBot：按车号搜索、查看详情、下载本子并发送到群聊，支持每日配额、并发限制和任务取消。",
   "author": {
