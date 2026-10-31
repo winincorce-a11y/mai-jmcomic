@@ -46,6 +46,7 @@ class PluginTestCase(unittest.IsolatedAsyncioTestCase):
         fake_jmcomic.DELAY = 0.0
         fake_jmcomic.PARTIAL = False
         fake_jmcomic.WRAP_RESULT = False
+        fake_jmcomic.BIG_ALBUM = 0
         fake_jmcomic.FakeTagPage.TOTAL = {}
         fake_jmcomic.FakeClient.ALBUM_TAGS = {}
 
@@ -703,38 +704,95 @@ class DownloadTests(PluginTestCase):
         self.assertEqual(len(self.send.forwards), 1)
         self.assertEqual(sum(len(nodes) for _, nodes in self.send.forwards), 6)
 
-    async def test_forward_retries_before_giving_up(self) -> None:
-        """转发没回执时先重试，且不逐张补发（避免图片跑到聊天记录外）。"""
+    async def test_forward_retries_never_falls_back_to_images(self) -> None:
+        """私聊（无 group_id）转发没回执时重试合并转发，绝不逐张补发。
+
+        重试次数由 forward_retry 驱动（默认 2 → 共 3 次）；
+        重试间隔 5 秒太慢，patch 掉 asyncio.sleep 加速测试。
+        """
 
         self.send.fail_forward = True
-        await self.command("350234")
-        await wait_jobs(self.plugin)
+        await self.command("350234", group_id="")
+        await wait_jobs(self.plugin, timeout=40)
 
-        # forward_retry=2 → 共 3 次尝试
+        # forward_retry=2 → 1 + 2 = 3 次尝试
         self.assertEqual(self.send.forward_attempts, 3)
         self.assertEqual(self.send.images, [])
         self.assertIn("未返回回执", self.send.text_body)
 
-    async def test_forward_fallback_disabled_by_default(self) -> None:
-        """默认 forward_fallback=none：即使失败也不产生散图。"""
+    async def test_group_forward_failure_falls_back_to_images(self) -> None:
+        """群聊合并转发被云端审核拦截后，自动降级为逐张直发重编码图。
+
+        实测 QQ 对群聊合并转发做内容级审核（重编码无法绕过），而逐张
+        直发只查指纹库。兜底是群里能看到图的唯一途径。
+        """
 
         self.send.fail_forward = True
+        await self.command("350234")  # 默认 group_id="g1"（群聊）
+        await wait_jobs(self.plugin, timeout=40)
+
+        # 合并转发先试了 3 次，然后逐张直发 6 张
+        self.assertEqual(self.send.forward_attempts, 3)
+        self.assertEqual(len(self.send.images), 6)
+        self.assertIn("逐张发送", self.send.text_body)
+
+    async def test_group_forward_failure_no_fallback_when_disabled(self) -> None:
+        """group_fallback=none 时不降级，保持聊天记录形式优先。"""
+
+        self.plugin.set_plugin_config(
+            self._config_with(send={"group_fallback": "none"})
+        )
+        self.send.fail_forward = True
         await self.command("350234")
-        await wait_jobs(self.plugin)
+        await wait_jobs(self.plugin, timeout=40)
 
         self.assertEqual(len(self.send.images), 0)
+        self.assertEqual(self.send.forward_attempts, 3)
 
-    async def test_forward_fallback_to_images_when_enabled(self) -> None:
-        """显式打开兜底时才逐张补发。"""
+    async def test_no_fallback_images_ever(self) -> None:
+        """私聊场景下无论配置如何都不逐张补发：聊天记录形式优先于送达。"""
 
         self.plugin.set_plugin_config(
             self._config_with(send={"forward_fallback": "image"})
         )
         self.send.fail_forward = True
-        await self.command("350234")
-        await wait_jobs(self.plugin)
+        await self.command("350234", group_id="")
+        await wait_jobs(self.plugin, timeout=40)
 
-        self.assertEqual(len(self.send.images), 6)
+        self.assertEqual(len(self.send.images), 0)
+        self.assertEqual(self.send.forward_attempts, 3)
+
+    async def test_private_only_blocks_group_and_allows_private(self) -> None:
+        """private_only 开启：群聊命令被拒，私聊正常。"""
+
+        self.plugin.set_plugin_config(self._config_with(limits={"private_only": True}))
+        await self.plugin.on_config_update("self", {}, "1")
+
+        # 群聊：拒绝
+        await self.command("350234")
+        self.assertIn("仅私聊生效", self.send.text_body)
+        self.assertFalse(self.plugin._jobs)
+
+        # 私聊（group_id 为空）：正常走完下载 + 发送
+        await self.command("350234", group_id="")
+        await wait_jobs(self.plugin)
+        self.assertTrue(self.send.forwards)
+        self.assertIn("✅ JM350234", self.send.text_body)
+
+    async def test_all_images_in_single_record_when_forward_ok(self) -> None:
+        """核心诉求：36 张大漫画也必须全进同一条聊天记录（不拆批）。"""
+
+        # 造一个 90 张的大本子，远超旧逻辑会拆批的规模
+        fake_jmcomic.BIG_ALBUM = 90
+        try:
+            await self.command("350234")
+            await wait_jobs(self.plugin)
+        finally:
+            fake_jmcomic.BIG_ALBUM = 0
+
+        self.assertEqual(len(self.send.forwards), 1)
+        total_nodes = sum(len(nodes) for _, nodes in self.send.forwards)
+        self.assertEqual(total_nodes, 90)
 
     async def test_partial_failure_still_sends(self) -> None:
         fake_jmcomic.PARTIAL = True
@@ -763,6 +821,88 @@ class DownloadTests(PluginTestCase):
         self.assertEqual(sum(len(nodes) for _, nodes in self.send.forwards), 6)
         self.assertEqual(self.send.images, [])
         self.assertIn("发送 6 张", self.send.text_body)
+
+    async def test_reencode_changes_fingerprint_for_real_images(self) -> None:
+        """真实图片（PIL 能解码）发送前会被重编码：字节改变但尺寸不变。
+
+        群聊风控按图片指纹拦截，重编码是绕开手段；假 JPEG 数据打不开
+        时必须原样发出（上面的用例已覆盖回退路径）。
+        """
+
+        from io import BytesIO
+
+        from PIL import Image
+
+        # 把 fake 下载图换成一张真实的 JPEG
+        buf = BytesIO()
+        Image.new("RGB", (32, 48), (200, 30, 90)).save(buf, "JPEG", quality=95)
+        real_jpeg = buf.getvalue()
+        fake_jmcomic.IMAGE_BYTES = real_jpeg
+        try:
+            await self.command("350234")
+            await wait_jobs(self.plugin)
+        finally:
+            fake_jmcomic.IMAGE_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-payload"
+
+        images = self.images_sent()
+        self.assertTrue(images)
+        for sent in images:
+            self.assertNotEqual(
+                sent, real_jpeg, "开启 reencode 时字节必须改变（换指纹）"
+            )
+            with Image.open(BytesIO(sent)) as im:
+                self.assertEqual(im.format, "JPEG")
+                self.assertEqual(im.size, (32, 48), "重编码不得改变尺寸")
+
+    async def test_reencode_disabled_keeps_original_bytes(self) -> None:
+        """关闭 reencode 时原始字节原样发送。"""
+
+        from io import BytesIO
+
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new("RGB", (32, 48), (10, 120, 220)).save(buf, "JPEG", quality=95)
+        real_jpeg = buf.getvalue()
+        fake_jmcomic.IMAGE_BYTES = real_jpeg
+        try:
+            self.plugin.set_plugin_config(self._config_with(send={"reencode": False}))
+            await self.plugin.on_config_update("self", {}, "1")
+            await self.command("350234")
+            await wait_jobs(self.plugin)
+        finally:
+            fake_jmcomic.IMAGE_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-payload"
+
+        images = self.images_sent()
+        self.assertTrue(images)
+        for sent in images:
+            self.assertEqual(
+                sent,
+                real_jpeg,
+                "关闭 reencode 时必须原样发送",
+            )
+
+    async def test_reencode_gif_passthrough(self) -> None:
+        """GIF 动图不重编码（会丢动画帧），原样发送。"""
+
+        from io import BytesIO
+
+        from PIL import Image
+
+        buf = BytesIO()
+        Image.new("P", (16, 16)).save(buf, "GIF", save_all=True)
+        gif_bytes = buf.getvalue()
+        fake_jmcomic.IMAGE_BYTES = gif_bytes
+        try:
+            await self.command("350234")
+            await wait_jobs(self.plugin)
+        finally:
+            fake_jmcomic.IMAGE_BYTES = b"\xff\xd8\xff\xe0fake-jpeg-payload"
+
+        images = self.images_sent()
+        self.assertTrue(images)
+        for sent in images:
+            self.assertEqual(sent, gif_bytes)
 
     async def test_delete_after_send(self) -> None:
         self.plugin.set_plugin_config(self._config_with(download={"delete_after_send": True}))

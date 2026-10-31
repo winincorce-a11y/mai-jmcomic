@@ -25,6 +25,9 @@ WRAP_RESULT = False
 #: 是否在写完图片后抛「部分失败」。
 PARTIAL = False
 
+#: 大本子测试：>0 时下载会写这么多张图（覆盖默认 6 张）
+BIG_ALBUM = 0
+
 
 class DownloadCancelledException(Exception):
     """对应 jmcomic 的取消异常。"""
@@ -322,9 +325,12 @@ def download_album(
     assert option is not None
     base = option.data["dir_rule"]["base_dir"]
     _pause(control)
-    files = _write_images(base, chapters=2, per_chapter=3)
+    if BIG_ALBUM > 0:
+        files = _write_images(base, chapters=1, per_chapter=BIG_ALBUM)
+    else:
+        files = _write_images(base, chapters=2, per_chapter=3)
     _pause(control)
-    album = FakeAlbum(str(jm_album_id), page_count=len(files), chapters=2)
+    album = FakeAlbum(str(jm_album_id), page_count=len(files), chapters=2 if BIG_ALBUM <= 0 else 1)
     if PARTIAL:
         raise PartialDownloadFailedException("2 张图片下载失败")
     if WRAP_RESULT:

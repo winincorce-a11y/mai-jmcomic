@@ -158,6 +158,51 @@ _SEARCH_RECORD_NAME = "JM 搜索"
 #: 下载搜索结果封面的总等待上限（秒）。封面是锦上添花，到点就只发文字。
 _COVER_TIMEOUT = 60.0
 
+#: 重编码后单张图片的字节上限。重编码只会变小，超过它说明原文件本身
+#: 过大，重编码没有意义——调用方（``_encode_image``）已先行拦截。
+_REENCODE_MAX_INPUT_BYTES = 8 * 1024 * 1024
+
+#: 重编码认得动的格式。动图（GIF）与动图 WebP 重编码会丢动画，直接跳过。
+_REENCODE_STATIC_FORMATS = frozenset({"JPEG", "PNG", "WEBP"})
+
+
+def _reencode_image(data: bytes, path: str, quality: int) -> bytes | None:
+    """对图片做轻量重编码，返回新字节；无法/无需重编码时返回 ``None``。
+
+    目的是改变图片指纹以绕开 QQ 群聊的内容风控（原图指纹被拦截时
+    表现为消息无回执）。流程：
+
+    1. GIF 等动图直接跳过（重编码会丢动画帧）；
+    2. JPEG 原图：直接以 ``quality`` 重存，不缩放，尺寸不变；
+    3. 其他静态格式（PNG/WebP/未知）：转成 JPEG 再重存——漫画图转
+       JPEG 画质损失可忽略，且体积通常更小。
+
+    任何异常都回退原始字节（调用方拿到 ``None`` 即发原图），
+    保证「发得出」优先于「换指纹」。
+    """
+
+    del path  # 仅用于将来日志定位；此处不打印避免逐张刷屏
+    try:
+        from io import BytesIO
+
+        from PIL import Image
+
+        with Image.open(BytesIO(data)) as im:
+            fmt = (im.format or "").upper()
+            if fmt not in _REENCODE_STATIC_FORMATS:
+                return None
+            im = im.convert("RGB")
+            buf = BytesIO()
+            im.save(buf, "JPEG", quality=max(50, min(95, quality)))
+            out = buf.getvalue()
+        # 极端兜底：重编码反而膨胀超过 1.5 倍时仍采用——指纹变了才是目的，
+        # 体积只是次要指标；只有超过单张上限才放弃。
+        if len(out) > _REENCODE_MAX_INPUT_BYTES:
+            return None
+        return out
+    except Exception:  # noqa: BLE001 - 重编码失败必须回退原图
+        return None
+
 
 # ---------------------------------------------------------------------------
 # 配置
@@ -376,6 +421,33 @@ class SendSection(PluginConfigBase):
             "step": 0.5,
         },
     )
+    reencode: bool = Field(
+        default=True,
+        description="发送前对图片轻量重编码（换图片指纹）。QQ 群聊会按图片指纹拦截已知的来源图片（表现为「无回执」静默吞图），重编码可绕开；视觉上几乎无差别",
+        json_schema_extra={
+            "label": "图片重编码",
+            "hint": "群聊吞图（提示无回执）时开启；换掉图片指纹可绕开 QQ 群风控，画质几乎无损",
+        },
+    )
+    reencode_quality: int = Field(
+        default=88,
+        ge=50,
+        le=95,
+        description="重编码的 JPEG 质量（1-95）；越高越清晰、体积越大",
+        json_schema_extra={
+            "label": "重编码质量",
+            "hint": "默认 88，视觉无损；风控仍吞图时可降到 80 试试",
+            "step": 2,
+        },
+    )
+    group_fallback: Literal["image", "none"] = Field(
+        default="image",
+        description="群聊合并转发被 QQ 云端审核拦截时的兜底：image=改为逐张直发重编码图（实测可过），none=不补发",
+        json_schema_extra={
+            "label": "群聊兜底",
+            "hint": "QQ 对群聊合并转发做云端内容审核（漫画图必拦），拦截后自动改为逐张直发；逐张直发只查指纹、重编码后可过",
+        },
+    )
 
 
 class LimitSection(PluginConfigBase):
@@ -445,6 +517,14 @@ class LimitSection(PluginConfigBase):
             "label": "会话黑名单",
             "placeholder": "111111111, 222222222",
             "hint": "填群号或 QQ 号，多个用逗号分隔；命中即拒绝、白名单也救不回来。留空表示不拉黑",
+        },
+    )
+    private_only: bool = Field(
+        default=False,
+        description="开启后只在私聊中响应，群聊一律拒绝。群聊合并转发会被 QQ 云端审核拦截、逐张直发又有刷屏和账号风险，可开此项只保留私聊功能",
+        json_schema_extra={
+            "label": "仅私聊生效",
+            "hint": "开启后群聊里所有命令都不响应（含搜索/下载/标签）；私聊不受影响",
         },
     )
 
@@ -1142,31 +1222,11 @@ class JmComicPlugin(MaiBotPlugin):
         if not selected:
             raise JmError("没有符合条件的图片（可能都超过单张大小上限）")
 
-        sent = 0
-        #: 已发出但没有拿到回执的张数；QQ 常见「消息已进聊天记录但无回执」。
-        unconfirmed = 0
         if config.send.mode == "forward":
-            for batch in self._plan_forward_batches(selected):
-                nodes: list[dict[str, Any]] = []
-                for path in batch:
-                    encoded = await self._encode_image(path)
-                    if not encoded:
-                        continue
-                    nodes.append(
-                        {
-                            "user_id": "0",
-                            "nickname": f"JM{job.ref.jm_id}",
-                            "segments": [{"type": "image", "content": encoded}],
-                        }
-                    )
-                if not nodes:
-                    continue
-                sent_now, missed = await self._send_forward_batch(job, batch, nodes)
-                sent += sent_now
-                unconfirmed += missed
-                await asyncio.sleep(0.2)
+            sent, unconfirmed = await self._send_all_in_one_record(job, selected)
         else:
             sent = await self._send_one_by_one(selected, job.stream_id)
+            unconfirmed = 0
 
         job.sent_images = sent
         job.unconfirmed_images = unconfirmed
@@ -1176,41 +1236,112 @@ class JmComicPlugin(MaiBotPlugin):
             raise JmError("图片一张都没发出去，可能是平台限流、图片过大或适配器不支持")
         return sent
 
-    async def _send_forward_batch(
-        self, job: Job, batch: list[str], nodes: list[dict[str, Any]]
-    ) -> tuple[int, int]:
-        """发送一条合并转发，返回 ``(确认发出张数, 未确认张数)``。
+    async def _send_all_in_one_record(self, job: Job, files: list[str]) -> tuple[int, int]:
+        """把全部图片放进**同一条聊天记录**发出，失败按配置兜底。
 
-        SnowLuma/QQ 经常出现「消息已进聊天记录但没回执」。此时如果退回逐张
-        补发，那几张图就会跑到合并转发外面，所以默认只重试、不补发；未确认的
-        数量单独记账，任务不算失败。
+        用户诉求：所有图片必须塞进同一条聊天记录，不拆批、不逐张。
+        即使 RPC 帧预算被迫拆分（图特别多时），也只拆成最少批数，
+        且每批都重试到成功或达到上限。
+
+        实测（2026-10）：QQ 对**群聊合并转发**走云端内容审核（识别图片
+        内容本身，漫画图必拦，换指纹/加边框/转格式均无效），被拦时协议
+        返回 ``result=0`` 但 ``sequence=null``（无回执）；**逐张直发**只查
+        图片指纹库，重编码即可通过。因此群聊（``job.group_id`` 非空）在
+        合并转发确认失败后，按 ``send.group_fallback`` 配置降级为逐张
+        直发重编码图，避免无意义硬撞风控累积账号风险。
+
+        返回 ``(确认发出张数, 未确认张数)``。未确认指平台没回执但可能实际
+        已进聊天记录的情况。
+        """
+
+        batches = self._plan_forward_batches_minimal(files)
+        total_sent = 0
+        total_unconfirmed = 0
+
+        for index, batch in enumerate(batches):
+            nodes: list[dict[str, Any]] = []
+            for path in batch:
+                encoded = await self._encode_image(path)
+                if not encoded:
+                    continue
+                nodes.append(
+                    {
+                        "user_id": "0",
+                        "nickname": f"JM{job.ref.jm_id}",
+                        "segments": [{"type": "image", "content": encoded}],
+                    }
+                )
+            if not nodes:
+                continue
+
+            sent, missed = await self._send_record_with_retry(job, nodes, index, len(batches))
+            total_sent += sent
+            total_unconfirmed += missed
+            if len(batches) > 1:
+                await asyncio.sleep(1.0)
+
+        # 群聊兜底：合并转发被云端审核拦截时，改逐张直发（重编码图可过）
+        if (
+            total_sent == 0
+            and total_unconfirmed > 0
+            and job.group_id
+            and self.config.send.group_fallback == "image"
+        ):
+            self.ctx.logger.info(
+                "群聊合并转发被 QQ 云端审核拦截（%s 张未确认），改为逐张直发重编码图",
+                total_unconfirmed,
+            )
+            await self._say(
+                job.stream_id,
+                f"⚠️ 群聊合并转发被 QQ 风控拦截，改为逐张发送《{job.display_title}》"
+                f"（共 {total_unconfirmed} 张，间隔稍长请耐心等待）",
+            )
+            sent = await self._send_one_by_one(files, job.stream_id)
+            if sent > 0:
+                total_sent = sent
+                total_unconfirmed = 0
+
+        return total_sent, total_unconfirmed
+
+    async def _send_record_with_retry(
+        self, job: Job, nodes: list[dict[str, Any]], index: int, total_batches: int
+    ) -> tuple[int, int]:
+        """重试发送一条合并转发，直到成功或达到重试上限。
+
+        与旧逻辑的区别：**永不逐张补发**。逐张会破坏「所有图片在一条聊天
+        记录里」的形式，宁可全部未确认也不拆散。重试间隔从 1.5s 拉长到 5s，
+        给 QQ 风控留冷却时间。
         """
 
         total = len(nodes)
+        label = (
+            job.display_title
+            if total_batches == 1
+            else f"{job.display_title}（第 {index + 1}/{total_batches} 条）"
+        )
+        # 重试上限回到配置驱动（默认 2）。实测群聊合并转发被云端内容审核
+        # 拦截时重试必然再次失败，多试只会累积账号风险（严重时被踢下线）。
         attempts = max(1, int(self.config.send.forward_retry) + 1)
         for attempt in range(1, attempts + 1):
             try:
                 ok = await self.ctx.send.forward(nodes, job.stream_id)
             except Exception:  # noqa: BLE001 - 适配器异常也算一次失败
                 self.ctx.logger.warning(
-                    "合并转发异常（第 %s/%s 次）%s", attempt, attempts, job.display_title, exc_info=True
+                    "合并转发异常（第 %s/%s 次）%s", attempt, attempts, label, exc_info=True
                 )
                 ok = False
             if ok:
                 return total, 0
             self.ctx.logger.warning(
-                "合并转发未确认（第 %s/%s 次）：%s，%s 张", attempt, attempts, job.display_title, total
+                "合并转发未确认（第 %s/%s 次）：%s，%s 张", attempt, attempts, label, total
             )
             if attempt < attempts:
-                await asyncio.sleep(1.5)
-
-        if self.config.send.forward_fallback == "image":
-            self.ctx.logger.warning("合并转发始终失败，逐张补发 %s", job.display_title)
-            return await self._send_one_by_one(batch, job.stream_id), 0
+                await asyncio.sleep(5.0)
 
         self.ctx.logger.warning(
-            "合并转发未得到回执，按配置不逐张补发（避免图片跑到聊天记录外）：%s，%s 张",
-            job.display_title,
+            "合并转发 %s 次尝试后仍未确认：%s，%s 张（按用户要求不逐张补发，保持聊天记录形式）",
+            attempts,
+            label,
             total,
         )
         return 0, total
@@ -1236,7 +1367,14 @@ class JmComicPlugin(MaiBotPlugin):
         return sent
 
     async def _encode_image(self, path: str) -> str:
-        """读文件并编码 base64；读取失败返回空串。"""
+        """读文件并编码 base64；读取失败返回空串。
+
+        开启 ``send.reencode`` 时先做轻量重编码：QQ 群聊风控按图片指纹
+        （文件 md5）拦截已知来源的图片——实测原图被静默吞掉（协议返回
+        ``result=0`` 但 ``sequence=null``，即无回执），同一张图用 Pillow
+        重新编码改变指纹后即可正常发出。动图（GIF）与重编码失败时回退
+        原始字节，保证「发得出」优先于「换指纹」。
+        """
 
         try:
             data = await asyncio.to_thread(Path(path).read_bytes)
@@ -1248,17 +1386,20 @@ class JmComicPlugin(MaiBotPlugin):
         if len(data) > _MAX_IMAGE_BYTES:
             self.ctx.logger.warning("图片过大，跳过发送: %s (%s bytes)", path, len(data))
             return ""
+        if self.config.send.reencode:
+            encoded = await asyncio.to_thread(_reencode_image, data, path, int(self.config.send.reencode_quality))
+            if encoded is not None:
+                data = encoded
         return base64.b64encode(data).decode("ascii")
 
-    def _plan_forward_batches(self, files: list[str]) -> list[list[str]]:
-        """切分合并转发：尽量全部塞进同一条，只有超过体积上限时才拆。
+    def _plan_forward_batches_minimal(self, files: list[str]) -> list[list[str]]:
+        """把图片切成**最少批数**的合并转发。
 
-        ``forward_batch`` 为 0 表示不限制张数；此时唯一会触发拆分的是 RPC 帧
-        预算（base64 总量），保证一部漫画默认只产生一条聊天记录。
+        用户要求所有图片进同一条聊天记录，所以这里忽略 ``forward_batch``
+        张数限制，只受 RPC 帧预算约束（超预算会被 Runner 拒收，必须拆）。
+        正常长度的漫画（一两百张以内）都会是 1 批。
         """
 
-        raw_batch = max(0, int(self.config.send.forward_batch))
-        max_count = raw_batch or len(files) or 1
         batches: list[list[str]] = []
         current: list[str] = []
         current_size = 0
@@ -1269,7 +1410,7 @@ class JmComicPlugin(MaiBotPlugin):
             except OSError:
                 continue
             encoded_size = (raw_size + 2) // 3 * 4
-            if current and (len(current) >= max_count or current_size + encoded_size > _FRAME_BUDGET):
+            if current and current_size + encoded_size > _FRAME_BUDGET:
                 batches.append(current)
                 current = []
                 current_size = 0
@@ -1281,7 +1422,7 @@ class JmComicPlugin(MaiBotPlugin):
 
         if len(batches) > 1:
             self.ctx.logger.info(
-                "共 %s 张，超过单条体积上限（%s 字节），拆成 %s 条聊天记录",
+                "共 %s 张，超过单条 RPC 帧预算（%s 字节），最少拆成 %s 条聊天记录",
                 len(files),
                 _FRAME_BUDGET,
                 len(batches),
@@ -1952,9 +2093,12 @@ class JmComicPlugin(MaiBotPlugin):
     def _chat_reject_reason(self, group_id: str, user_id: str) -> str:
         """返回拒绝原因；允许使用时返回空串。
 
-        黑名单优先级最高：命中即拒绝，白名单也无法豁免。
+        黑名单优先级最高：命中即拒绝，白名单也无法豁免；
+        ``private_only`` 开启时群聊一律拒绝。
         """
 
+        if self.config.limits.private_only and group_id:
+            return "🔒 本插件已设置为仅私聊生效，请在私聊中使用。"
         if self._chat_blocked(group_id, user_id):
             return "⛔ 当前会话已被拉黑，无法使用 JM 功能。"
         if not self._chat_allowed(group_id, user_id):

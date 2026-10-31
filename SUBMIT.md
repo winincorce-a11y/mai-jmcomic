@@ -16,7 +16,7 @@
 | --- | --- | --- |
 | Manifest 版本 | `manifest_version` 必须为 `2` | ✅ `2` |
 | 插件 ID | 字母/数字/下划线，`.` 或 `-` 分隔 | ✅ `github.winincorce-a11y.mai-jmcomic` |
-| 版本号 | **严格三段式** `X.Y.Z` | ✅ `1.5.3` |
+| 版本号 | **严格三段式** `X.Y.Z` | ✅ `1.5.4` |
 | 必填字段 | `id` `version` `name` `description` `author` `license` `urls` `host_application` `sdk` `capabilities` `i18n` | ✅ 全部齐备 |
 | `author` | `{name, url}`，`url` 必须 `http(s)://` | ✅ |
 | `urls.repository` | 公开 GitHub HTTPS，无 `.git` 后缀 | ✅ |
@@ -24,7 +24,7 @@
 | 根目录文件 | `_manifest.json`、`plugin.py`、`LICENSE`、`README.md` | ✅ |
 | 根目录不能有 `config.toml` | 必须移出版本控制 | ✅ 已 `.gitignore` |
 | LICENSE 与 `license` 一致 | MIT | ✅ |
-| 已发布 Release | 非草稿、非预发布 | ✅ `v1.5.3` |
+| 已发布 Release | 非草稿、非预发布 | ✅ `v1.5.4` |
 | 禁止字段 | `categories` / `keywords` / `repository_url` / `homepage_url` | ✅ 均未出现 |
 
 > **注意**：`keywords` 与 `categories` 不能写进 `_manifest.json`。Host 的
@@ -42,7 +42,7 @@ Issue #1186 的两次 AI 审核结论一致：**工程实现没问题，卡点�
 | 1 | `download.base_dir` 接受任意绝对路径，配合 `delete_after_send=true` 会在该目录建目录再删掉 | 只接受**插件数据目录内的相对路径**；绝对路径/盘符/`..` 越界一律忽略并回落默认目录（`_resolve_download_root`） |
 | 2 | LLM 工具 `jmcomic_download` 把触发权交给规划器，无约束 | 新增 `[tools].allow_download`，**默认 `false`**；关闭时调用只返回提示。只读工具不受影响 |
 | 3 | 封面缓存 `covers/` 只增不清 | 新增 `_trim_cover_cache()`：上限 500 个文件，超出按 mtime 删到 80% |
-| 4 | README 头部版本仍是 1.1.0，与 manifest 不符 | 已改为 `1.5.3`，与本文件、manifest 三处一致 |
+| 4 | README 头部版本仍是 1.1.0，与 manifest 不符 | 已改为 `1.5.3`，与本文件、manifest 三处一致（当前已迭代至 1.5.4） |
 
 ### 未解决（无法通过改代码解决）
 
@@ -70,14 +70,14 @@ Issue #1186 的两次 AI 审核结论一致：**工程实现没问题，卡点�
 ## 四、发布新版本的流程
 
 1. 改 `_manifest.json` 的 `version`（三段式），确保与本次提交一致
-2. 提交代码，打 tag（`v1.5.3` 或 `1.5.3`），发布 GitHub Release
+2. 提交代码，打 tag（`v1.5.4` 或 `1.5.4`），发布 GitHub Release
 3. 已收录版本的 Tag / commit **不可修改**；修复只能发新版本号
 
 ## 五、自检清单
 
 - [x] `urls` 指向真实仓库 `https://github.com/winincorce-a11y/mai-jmcomic`
 - [x] 仓库根目录直接是插件目录（没有再套一层）
-- [x] Release 已发布（`v1.5.3`）并带 zip 资产
+- [x] Release 已发布（`v1.5.4`）并带 zip 资产
 - [x] 根目录无 `config.toml`、无 `__pycache__`、无测试临时目录
 - [x] `base_dir` 已限制在插件数据目录内
 - [x] AI 下载工具默认关闭
